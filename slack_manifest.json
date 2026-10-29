@@ -1,0 +1,34 @@
+{
+  "display_information": {
+    "name": "MLB Stats",
+    "description": "Live MLB scores, schedules, and stats via MCP",
+    "background_color": "#002D72"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "MLB Stats",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://YOUR-APP.herokuapp.com/slack/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "mcp:connect"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  },
+  "mcp_servers": {
+    "mlb-stats": {
+      "url": "https://YOUR-APP.herokuapp.com/mcp",
+      "auth_type": "no_auth"
+    }
+  }
+}

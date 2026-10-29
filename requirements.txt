@@ -1,0 +1,4 @@
+mcp>=1.0.0,<2
+httpx>=0.27.0
+starlette>=0.40.0
+pybaseball>=2.2.7
