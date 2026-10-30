@@ -200,12 +200,39 @@ def _season_stats(player_id: int, group: str, season: int) -> dict | None:
     return splits[0].get("stat") or {}
 
 
+def _format_hitting(h: dict) -> str:
+    return (
+        f"{h.get('avg', '—')} AVG, "
+        f"{h.get('homeRuns', 0)} HR, "
+        f"{h.get('rbi', 0)} RBI, "
+        f"{h.get('ops', '—')} OPS, "
+        f"{h.get('stolenBases', 0)} SB, "
+        f"{h.get('baseOnBalls', 0)} BB, "
+        f"{h.get('strikeOuts', 0)} K "
+        f"({h.get('gamesPlayed', 0)} G, {h.get('atBats', 0)} AB, "
+        f"{h.get('hits', 0)} H, {h.get('doubles', 0)} 2B, {h.get('triples', 0)} 3B)"
+    )
+
+
+def _format_pitching(p: dict) -> str:
+    return (
+        f"{p.get('era', '—')} ERA, "
+        f"{p.get('wins', 0)}-{p.get('losses', 0)} W-L, "
+        f"{p.get('strikeOuts', 0)} K, "
+        f"{p.get('baseOnBalls', 0)} BB, "
+        f"{p.get('whip', '—')} WHIP, "
+        f"{p.get('inningsPitched', '—')} IP, "
+        f"{p.get('saves', 0)} SV "
+        f"({p.get('gamesPlayed', 0)} G, {p.get('gamesStarted', 0)} GS)"
+    )
+
+
 @mcp.tool(
-    description="Get a player's current-season MLB stats by name. Works for hitters and pitchers. Example: Aaron Judge or Gerrit Cole.",
+    description="Get a player's MLB stats by name. Defaults to current season but accepts a year like 2024. Works for hitters and pitchers. Example: 'Aaron Judge' or 'Gerrit Cole 2024'.",
     annotations=ToolAnnotations(title="Get player stats", readOnlyHint=True, openWorldHint=True),
     structured_output=False,
 )
-def get_player_stats(player_name: str) -> str:
+def get_player_stats(player_name: str, season: str = "") -> str:
     name = player_name.strip()
     if not name:
         return "Pass a player name, like Aaron Judge."
@@ -214,36 +241,216 @@ def get_player_stats(player_name: str) -> str:
     if not player:
         return f"Couldn't find an MLB player named *{name}*. Try the full name."
 
-    season = date_cls.today().year
+    yr = int(season.strip()) if season.strip().isdigit() else date_cls.today().year
     display = player.get("fullName") or name
     pos = (player.get("primaryPosition") or {}).get("abbreviation") or "?"
     team = (player.get("currentTeam") or {}).get("name") or "Team unknown"
 
-    hitting = _season_stats(player["id"], "hitting", season)
-    pitching = _season_stats(player["id"], "pitching", season)
+    hitting = _season_stats(player["id"], "hitting", yr)
+    pitching = _season_stats(player["id"], "pitching", yr)
 
-    lines = [f"*{display}* — {team} ({pos}) — {season} season\n"]
+    lines = [f"*{display}* — {team} ({pos}) — {yr} season\n"]
 
     if hitting:
-        lines.append(
-            "Hitting: "
-            f"{hitting.get('avg', '—')} AVG, "
-            f"{hitting.get('homeRuns', 0)} HR, "
-            f"{hitting.get('rbi', 0)} RBI, "
-            f"{hitting.get('ops', '—')} OPS "
-            f"({hitting.get('gamesPlayed', 0)} G, {hitting.get('atBats', 0)} AB)"
-        )
+        lines.append("Hitting: " + _format_hitting(hitting))
     if pitching:
-        lines.append(
-            "Pitching: "
-            f"{pitching.get('era', '—')} ERA, "
-            f"{pitching.get('wins', 0)}-{pitching.get('losses', 0)} W-L, "
-            f"{pitching.get('strikeOuts', 0)} K, "
-            f"{pitching.get('inningsPitched', '—')} IP "
-            f"({pitching.get('gamesPlayed', 0)} G)"
-        )
+        lines.append("Pitching: " + _format_pitching(pitching))
     if not hitting and not pitching:
-        lines.append(f"No {season} season stats yet.")
+        lines.append(f"No {yr} season stats found.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    description="Get a player's batting or pitching splits: vs LHP/RHP, home/away, by month, and with RISP. Key for platoon and lineup decisions. Defaults to current season; pass a year like 2024 for historical.",
+    annotations=ToolAnnotations(title="Get player splits", readOnlyHint=True, openWorldHint=True),
+    structured_output=False,
+)
+def get_player_splits(player_name: str, season: str = "") -> str:
+    name = player_name.strip()
+    if not name:
+        return "Pass a player name, like Aaron Judge."
+
+    player = _find_player(name)
+    if not player:
+        return f"Couldn't find an MLB player named *{name}*. Try the full name."
+
+    yr = int(season.strip()) if season.strip().isdigit() else date_cls.today().year
+    display = player.get("fullName") or name
+    pos = (player.get("primaryPosition") or {}).get("abbreviation") or "?"
+    is_pitcher = str(pos).upper() in ("P", "SP", "RP")
+    group = "pitching" if is_pitcher else "hitting"
+
+    data = _get(
+        f"/people/{player['id']}/stats",
+        stats="vsPlatoon,homeAway,byMonthPlayoffs,situational",
+        group=group,
+        season=yr,
+    )
+
+    lines = [f"*{display}* ({pos}) — {yr} splits\n"]
+    stat_groups = data.get("stats") or []
+
+    for sg in stat_groups:
+        split_type = (sg.get("type") or {}).get("displayName") or ""
+        splits = sg.get("splits") or []
+        if not splits:
+            continue
+
+        lines.append(f"\n*{split_type}*")
+        for sp in splits:
+            label = sp.get("split", {}).get("description") or "Unknown"
+            stat = sp.get("stat") or {}
+            if is_pitcher:
+                summary = (
+                    f"{stat.get('era', '—')} ERA, "
+                    f"{stat.get('strikeOuts', 0)} K, "
+                    f"{stat.get('baseOnBalls', 0)} BB, "
+                    f"{stat.get('inningsPitched', '—')} IP, "
+                    f"{stat.get('avg', '—')} opp AVG"
+                )
+            else:
+                summary = (
+                    f"{stat.get('avg', '—')} AVG, "
+                    f"{stat.get('ops', '—')} OPS, "
+                    f"{stat.get('homeRuns', 0)} HR, "
+                    f"{stat.get('rbi', 0)} RBI, "
+                    f"{stat.get('atBats', 0)} AB"
+                )
+            lines.append(f"  {label}: {summary}")
+
+    if len(lines) == 1:
+        lines.append(f"No split data found for {yr}.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    description="Get a player's game-by-game log for a season. Shows recent performance trends, hot/cold streaks, and pitcher workload. Defaults to current season; pass a year like 2024. Returns the last 20 games by default.",
+    annotations=ToolAnnotations(title="Get player game log", readOnlyHint=True, openWorldHint=True),
+    structured_output=False,
+)
+def get_player_game_log(player_name: str, season: str = "", last_n: str = "20") -> str:
+    name = player_name.strip()
+    if not name:
+        return "Pass a player name, like Aaron Judge."
+
+    player = _find_player(name)
+    if not player:
+        return f"Couldn't find an MLB player named *{name}*. Try the full name."
+
+    yr = int(season.strip()) if season.strip().isdigit() else date_cls.today().year
+    n = int(last_n.strip()) if last_n.strip().isdigit() else 20
+    display = player.get("fullName") or name
+    pos = (player.get("primaryPosition") or {}).get("abbreviation") or "?"
+    is_pitcher = str(pos).upper() in ("P", "SP", "RP")
+    group = "pitching" if is_pitcher else "hitting"
+
+    data = _get(
+        f"/people/{player['id']}/stats",
+        stats="gameLog",
+        group=group,
+        season=yr,
+    )
+
+    splits = ((data.get("stats") or [{}])[0].get("splits") or [])
+    if not splits:
+        return f"No game log found for *{display}* in {yr}."
+
+    recent = splits[-n:]
+    lines = [f"*{display}* ({pos}) — {yr} game log (last {len(recent)} games)\n"]
+
+    for g in recent:
+        stat = g.get("stat") or {}
+        dt = g.get("date") or ""
+        opp = (g.get("opponent") or {}).get("name") or "?"
+        home = "vs" if g.get("isHome") else "@"
+
+        if is_pitcher:
+            ip = stat.get("inningsPitched", "—")
+            k = stat.get("strikeOuts", 0)
+            bb = stat.get("baseOnBalls", 0)
+            er = stat.get("earnedRuns", 0)
+            pitches = stat.get("numberOfPitches", "—")
+            decision = stat.get("decision") or ""
+            dec_bit = f" ({decision})" if decision else ""
+            lines.append(f"  {dt} {home} {opp}: {ip} IP, {er} ER, {k} K, {bb} BB, {pitches} pitches{dec_bit}")
+        else:
+            ab = stat.get("atBats", 0)
+            h = stat.get("hits", 0)
+            hr = stat.get("homeRuns", 0)
+            rbi = stat.get("rbi", 0)
+            bb = stat.get("baseOnBalls", 0)
+            k = stat.get("strikeOuts", 0)
+            lines.append(f"  {dt} {home} {opp}: {h}-{ab}, {hr} HR, {rbi} RBI, {bb} BB, {k} K")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    description="Compare two players side by side. Great for 'Player A vs Player B' roster decisions. Defaults to current season; pass a year like 2024.",
+    annotations=ToolAnnotations(title="Compare players", readOnlyHint=True, openWorldHint=True),
+    structured_output=False,
+)
+def compare_players(player_a: str, player_b: str, season: str = "") -> str:
+    a_name = player_a.strip()
+    b_name = player_b.strip()
+    if not a_name or not b_name:
+        return "Pass two player names to compare."
+
+    player_a_data = _find_player(a_name)
+    player_b_data = _find_player(b_name)
+    if not player_a_data:
+        return f"Couldn't find *{a_name}*. Try the full name."
+    if not player_b_data:
+        return f"Couldn't find *{b_name}*. Try the full name."
+
+    yr = int(season.strip()) if season.strip().isdigit() else date_cls.today().year
+
+    results = []
+    for p in [player_a_data, player_b_data]:
+        display = p.get("fullName") or "?"
+        pos = (p.get("primaryPosition") or {}).get("abbreviation") or "?"
+        team = (p.get("currentTeam") or {}).get("name") or "?"
+        is_pitcher = str(pos).upper() in ("P", "SP", "RP")
+
+        hitting = _season_stats(p["id"], "hitting", yr)
+        pitching = _season_stats(p["id"], "pitching", yr)
+
+        results.append({
+            "display": display, "pos": pos, "team": team,
+            "hitting": hitting, "pitching": pitching,
+            "is_pitcher": is_pitcher,
+        })
+
+    lines = [f"*{results[0]['display']}* vs *{results[1]['display']}* — {yr}\n"]
+
+    for r in results:
+        lines.append(f"*{r['display']}* — {r['team']} ({r['pos']})")
+        if r["hitting"]:
+            lines.append("  Hitting: " + _format_hitting(r["hitting"]))
+        if r["pitching"]:
+            lines.append("  Pitching: " + _format_pitching(r["pitching"]))
+        if not r["hitting"] and not r["pitching"]:
+            lines.append(f"  No {yr} stats found.")
+        lines.append("")
+
+    # Add a quick edge summary for hitters
+    a, b = results
+    if a["hitting"] and b["hitting"]:
+        ah, bh = a["hitting"], b["hitting"]
+        edges_a, edges_b = [], []
+        for stat, label in [("avg", "AVG"), ("ops", "OPS"), ("homeRuns", "HR"), ("rbi", "RBI"), ("stolenBases", "SB")]:
+            va = float(ah.get(stat, 0) or 0)
+            vb = float(bh.get(stat, 0) or 0)
+            if va > vb:
+                edges_a.append(label)
+            elif vb > va:
+                edges_b.append(label)
+        if edges_a:
+            lines.append(f"*{a['display']}* leads in: {', '.join(edges_a)}")
+        if edges_b:
+            lines.append(f"*{b['display']}* leads in: {', '.join(edges_b)}")
 
     return "\n".join(lines)
 
@@ -331,11 +538,11 @@ def _quality_from_pitches(df) -> dict | None:
 
 
 @mcp.tool(
-    description="Get Baseball Savant contact quality for a hitter: xwOBA, barrel %, hard-hit %, exit velo, and vs LHP/RHP. Uses the last 21 days (expands to 45 if the sample is small). For roster decisions, not box-score AVG.",
+    description="Get Baseball Savant contact quality for a hitter: xwOBA, barrel %, hard-hit %, exit velo, and vs LHP/RHP. Defaults to full season (pass a year like 2024 for historical). For roster decisions, not box-score AVG.",
     annotations=ToolAnnotations(title="Get player quality of contact", readOnlyHint=True, openWorldHint=True),
     structured_output=False,
 )
-def get_player_quality(player_name: str) -> str:
+def get_player_quality(player_name: str, season: str = "") -> str:
     name = player_name.strip()
     if not name:
         return "Pass a hitter's name, like Aaron Judge or Freddie Freeman."
@@ -355,30 +562,21 @@ def get_player_quality(player_name: str) -> str:
     mlbam_id = int(player["id"])
     display = player.get("fullName") or name
     team = (player.get("currentTeam") or {}).get("name") or "Team unknown"
-    today = date_cls.today()
 
-    def pull(days: int):
-        start = (today - timedelta(days=days)).isoformat()
-        end = today.isoformat()
-        try:
-            return start, statcast_batter(start, end, player_id=mlbam_id)
-        except Exception as exc:
-            return start, exc
+    yr = int(season.strip()) if season.strip().isdigit() else date_cls.today().year
+    start = f"{yr}-03-01"
+    end = f"{yr}-11-30"
 
-    start, df = pull(21)
-    if isinstance(df, Exception):
-        return f"Error fetching Savant data for {display}: {df}"
+    try:
+        df = statcast_batter(start, end, player_id=mlbam_id)
+    except Exception as exc:
+        return f"Error fetching Savant data for {display}: {exc}"
+
     q = _quality_from_pitches(df)
-    window = f"{start} to {today.isoformat()}"
-    if not q or q["pa"] < 15:
-        start, df = pull(45)
-        if isinstance(df, Exception):
-            return f"Error fetching Savant data for {display}: {df}"
-        q = _quality_from_pitches(df)
-        window = f"{start} to {today.isoformat()} (expanded sample)"
+    window = f"{yr} full season"
 
     if not q or q["pa"] == 0:
-        return f"No Statcast batted-ball data for *{display}* in the last 45 days."
+        return f"No Statcast batted-ball data for *{display}* in {yr}."
 
     lines = [
         f"*{display}* — {team} ({pos}) — contact quality",
