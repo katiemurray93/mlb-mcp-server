@@ -21,7 +21,7 @@ MLB_BASE = "https://statsapi.mlb.com/api/v1"
 # ---------------------------------------------------------------------------
 # Config — set these as env vars (locally in .env, on Heroku via config vars)
 # ---------------------------------------------------------------------------
-HOST = os.environ.get("HOST", "127.0.0.1")
+HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
 # Slack app credentials — get these from api.slack.com/apps after creating the app
