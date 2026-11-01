@@ -7,7 +7,8 @@ Supports multi-workspace Slack OAuth for workshop/distribution use.
 import os
 import re
 from collections import defaultdict
-from datetime import date as date_cls, timedelta
+from datetime import date as date_cls, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -110,10 +111,19 @@ async def slack_callback(request: Request) -> HTMLResponse:
 
 def _get(path: str, **params) -> dict:
     url = f"{MLB_BASE}{path}"
-    with httpx.Client(timeout=10) as client:
-        r = client.get(url, params=params)
-        r.raise_for_status()
-        return r.json()
+    try:
+        with httpx.Client(timeout=10) as client:
+            r = client.get(url, params=params)
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(
+            f"MLB API returned HTTP {exc.response.status_code} for {path}"
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(f"MLB API request timed out for {path}") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Could not reach the MLB API for {path}: {exc}") from exc
 
 
 @mcp.tool(
@@ -122,59 +132,64 @@ def _get(path: str, **params) -> dict:
     structured_output=False,
 )
 def get_todays_games(date: str = "") -> str:
-    target_date = date.strip() or date_cls.today().isoformat()
+    # MLB schedules by US Eastern time; the server runs on UTC, so default to
+    # Eastern so "today" doesn't roll to the wrong day late in the US evening.
+    target_date = date.strip() or datetime.now(ZoneInfo("America/New_York")).date().isoformat()
 
-    data = _get(
-        "/schedule",
-        sportId=1,
-        date=target_date,
-        hydrate="linescore",
-    )
+    try:
+        data = _get(
+            "/schedule",
+            sportId=1,
+            date=target_date,
+            hydrate="linescore",
+        )
 
-    dates = data.get("dates", [])
-    if not dates:
-        return f"No games found for {target_date}."
+        dates = data.get("dates", [])
+        if not dates:
+            return f"No games found for {target_date}."
 
-    games = dates[0].get("games", [])
-    if not games:
-        return f"No games scheduled for {target_date}."
+        games = dates[0].get("games", [])
+        if not games:
+            return f"No games scheduled for {target_date}."
 
-    lines = [f"MLB games for {target_date} ({len(games)} game{'s' if len(games) != 1 else ''}):\n"]
+        lines = [f"MLB games for {target_date} ({len(games)} game{'s' if len(games) != 1 else ''}):\n"]
 
-    for g in games:
-        away = g["teams"]["away"]
-        home = g["teams"]["home"]
-        away_name = away["team"].get("teamName") or away["team"].get("name", "Unknown")
-        home_name = home["team"].get("teamName") or home["team"].get("name", "Unknown")
+        for g in games:
+            away = g["teams"]["away"]
+            home = g["teams"]["home"]
+            away_name = away["team"].get("teamName") or away["team"].get("name", "Unknown")
+            home_name = home["team"].get("teamName") or home["team"].get("name", "Unknown")
 
-        status_code = g["status"]["abstractGameState"]  # Preview / Live / Final
-        detailed = g["status"]["detailedState"]
+            status_code = g["status"]["abstractGameState"]  # Preview / Live / Final
+            detailed = g["status"]["detailedState"]
 
-        away_score = away.get("score")
-        home_score = home.get("score")
+            away_score = away.get("score")
+            home_score = home.get("score")
 
-        ls = g.get("linescore", {})
-        inning = ls.get("currentInning")
-        inning_half = ls.get("inningHalf", "")  # "Top" / "Bottom"
+            ls = g.get("linescore", {})
+            inning = ls.get("currentInning")
+            inning_half = ls.get("inningHalf", "")  # "Top" / "Bottom"
 
-        if status_code == "Preview":
-            game_time = g.get("gameDate", "")[:16].replace("T", " ") + " UTC"
-            line = f"  • {away_name} @ {home_name}  —  {detailed} ({game_time})"
-        elif status_code == "Live":
-            score = f"{away_name} {away_score}, {home_name} {home_score}"
-            inn = f"{inning_half} {inning}" if inning else ""
-            line = f"  • {score}  [{inn}]  🔴 LIVE"
-        else:
-            if away_score is not None and home_score is not None:
-                winner = away_name if away_score > home_score else home_name
+            if status_code == "Preview":
+                game_time = g.get("gameDate", "")[:16].replace("T", " ") + " UTC"
+                line = f"  • {away_name} @ {home_name}  —  {detailed} ({game_time})"
+            elif status_code == "Live":
                 score = f"{away_name} {away_score}, {home_name} {home_score}"
-                line = f"  • {score}  — {winner} win  ✅"
+                inn = f"{inning_half} {inning}" if inning else ""
+                line = f"  • {score}  [{inn}]  🔴 LIVE"
             else:
-                line = f"  • {away_name} @ {home_name}  — {detailed}"
+                if away_score is not None and home_score is not None:
+                    winner = away_name if away_score > home_score else home_name
+                    score = f"{away_name} {away_score}, {home_name} {home_score}"
+                    line = f"  • {score}  — {winner} win  ✅"
+                else:
+                    line = f"  • {away_name} @ {home_name}  — {detailed}"
 
-        lines.append(line)
+            lines.append(line)
 
-    return "\n".join(lines)
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"⚠️ Could not load game data: {exc}"
 
 
 def _find_player(name: str) -> dict | None:
@@ -283,7 +298,7 @@ def get_player_splits(player_name: str, season: str = "") -> str:
 
     data = _get(
         f"/people/{player['id']}/stats",
-        stats="vsPlatoon,homeAway,byMonthPlayoffs,situational",
+        stats="homeAndAway,byMonth,byDayOfWeek",
         group=group,
         season=yr,
     )
@@ -655,7 +670,10 @@ def _placeholder_team(name: str) -> bool:
 )
 def get_postseason(series: str = "") -> str:
     season = date_cls.today().year
-    data = _get("/schedule/postseason", season=season, hydrate="linescore")
+    try:
+        data = _get("/schedule/postseason", season=season, hydrate="linescore")
+    except Exception as exc:
+        return f"⚠️ Could not load game data: {exc}"
     dates = data.get("dates") or []
     if not dates:
         return f"No postseason games found for {season}."
